@@ -36,7 +36,7 @@ def send_image():
 
 if __name__ == '__main__':
     try:
-        
+        rospy.loginfo('Initiate fake_cam node')
         count = 1000
         send_image()
     except rospy.ROSInterruptException:

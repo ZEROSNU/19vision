@@ -23,8 +23,12 @@ BASIC SETTINGS
 # Maximum offset pixels from previous lane polynomial
 LANE_ROI_OFFSET = 100
 
-# Map size (2018 Competition : 600x600 -> 2019 Competition : 200x200 1px:3cm)
-MAP_SIZE = 600
+# IMAGE & MAP SIZE (2019 Competition MAP SIZE : 200x200, 1px:3cm)
+IMAGE_SIZE = 600
+MAP_SIZE = 200
+
+# Debug Mode
+Z_DEBUG = False
 
 def callback(data):
     img_input = bridge.imgmsg_to_cv2(data, 'bgr8')
@@ -61,7 +65,7 @@ def callback(data):
         # Previous coefficient data is not sufficient (less than 3)
         coeff = np.polyfit(x_vals, y_vals,2)
         coeff_buffer.append(coeff)
-        new_coeff = coeff
+        coeff_left = coeff
     
     else:
         # Previous coefficient data is sufficient (more than 3)
@@ -90,41 +94,110 @@ def callback(data):
         rsquared_prev2 = calculate_rsquared(x_vals, y_vals, prev_f2)
         rsquared_current = calculate_rsquared(x_vals, y_vals, current_f)
 
-        exp_sum = math.exp(rsquared_prev1) + math.exp(rsquared_prev2) + math.exp(rsquared_current)
+        exp_sum = math.exp(rsquared_prev1) + math.exp(rsquared_prev2) + math.exp(rsquared_current)+10E-10
         weight_prev1 = math.exp(rsquared_prev1) / exp_sum
         weight_prev2 = math.exp(rsquared_prev2) / exp_sum
         weight_current = math.exp(rsquared_current) / exp_sum
 
-        new_coeff = weight_prev1 * coeff_buffer[1] + weight_prev2 * coeff_buffer[2] + weight_current * coeff
+        coeff_left = weight_prev1 * coeff_buffer[1] + weight_prev2 * coeff_buffer[2] + weight_current * coeff
 
         # Updating buffer
         coeff_buffer[0:-1] = coeff_buffer[1:3]
-        coeff_buffer[2] = new_coeff
+        coeff_buffer[2] = coeff_left
 
-    t = np.arange(0,MAP_SIZE,1)
-    f = np.poly1d(new_coeff)
+    t = np.arange(0,IMAGE_SIZE,1)
+    f = np.poly1d(coeff_left)
 
-    polypoints = np.zeros((MAP_SIZE,2))
+    polypoints = np.zeros((IMAGE_SIZE,2))
+    polypoints_left = np.zeros((IMAGE_SIZE,2))
+    polypoints_left_ = np.zeros((IMAGE_SIZE,2))
     polypoints[:,0] = t
     polypoints[:,1] = f(t)
-
-    cv2.polylines(img, np.int32([polypoints]), False, (255,0,0),2)
-
-    cv2.imshow('image',yellow_mask)
-    cv2.imshow('color_image',img)
-    cv2.waitKey(50)
     
-    #cv2.imshow("window", img_cv2)
-    #cv2.waitKey(30)
-       
-def listener():
+    '''
+    ------------------------------------------------------------------------
+    DRAW RIGHT LANE
+    ------------------------------------------------------------------------
+    '''
+    
+    LANE_WIDTH = 280
+
+    
+    #just shifting works well(?)
+    '''
+    slopes = 2 * coeff_left[0] * t + coeff_left[1]
+    theta = np.arctan2((slopes), 1.0)
+    polypoints_left[:,0] = t + LANE_WIDTH * np.cos(theta-np.pi/2)
+    polypoints_left[:,1] = f(t) + LANE_WIDTH * np.sin(theta-np.pi/2)
+    '''
+    
+    polypoints_left_[:,0] = t
+    polypoints_left_[:,1] = f(t) - LANE_WIDTH
+
+    coeff_right = np.copy(coeff_left)
+    coeff_right[2] = coeff_right[2] - LANE_WIDTH
+    '''
+    ------------------------------------------------------------------------
+    CREATE NEW MASK FOR PUBLISH
+    OUSIDE LANE = OCCUPIED, WHITE, 1
+    INSIDE LANE = UNOCCUPIED, BLACK, 0
+    ------------------------------------------------------------------------
+    '''
+    mask_left = np.arange(0, IMAGE_SIZE, 1)
+    mask_right = np.arange(0, IMAGE_SIZE, 1)
+
+    mask_left = coeff_left[0] * mask_left * mask_left + coeff_left[1] * mask_left + coeff_left[2]
+    mask_left = np.zeros((IMAGE_SIZE,IMAGE_SIZE)) + mask_left
+
+    mask_right = coeff_right[0] * mask_right * mask_right + coeff_right[1] * mask_right + coeff_right[2]
+    mask_right = np.zeros((IMAGE_SIZE,IMAGE_SIZE)) + mask_right    
+
+    y_vals = np.arange(0,IMAGE_SIZE,1)
+    y_vals = np.broadcast_to(y_vals, (IMAGE_SIZE,IMAGE_SIZE)).T    
+
+    masked_img = np.zeros((IMAGE_SIZE,IMAGE_SIZE), dtype='uint8')
+    masked_img[mask_left<y_vals] = 255
+    masked_img[mask_right>y_vals] = 255
+
+    #Draw lines on lane
+    cv2.polylines(img, np.int32([polypoints]), False, (255,0,0),2)
+    #cv2.polylines(img, np.int32([polypoints_left]), False, (255,0,0),2)
+    cv2.polylines(img, np.int32([polypoints_left_]), False, (0,255,0),2)
+
+
+    #resize, rotate, and flip for output
+    M_lane_map = cv2.getRotationMatrix2D((int(MAP_SIZE/2),int(MAP_SIZE/2)),180,1)
+    M_raw_map = cv2.getRotationMatrix2D((IMAGE_SIZE/2,IMAGE_SIZE/2),90,1)
+
+    masked_img = cv2.resize(masked_img,(MAP_SIZE,MAP_SIZE))
+    masked_img = masked_img.T
+    
+    masked_img = cv2.warpAffine(masked_img,M_lane_map,(MAP_SIZE,MAP_SIZE))
+    send_img_lane_map = bridge.cv2_to_imgmsg(masked_img, "mono8")
+    pub_lane_map.publish(send_img_lane_map)
+
+    send_img =  cv2.warpAffine(img,M_raw_map,(IMAGE_SIZE,IMAGE_SIZE))
+    send_img_raw_map = bridge.cv2_to_imgmsg(send_img, "bgr8")
+    pub_raw_map.publish(send_img_raw_map)
+
+
+    if Z_DEBUG:
+        cv2.imshow('image',yellow_mask)
+        cv2.imshow('color_image',img)
+        cv2.imshow('send_image',masked_img)
+        cv2.waitKey(50)
+
+    
+
+if __name__ == '__main__':
+    rospy.loginfo('Initiate draw_lane node')
 
     rospy.init_node('draw_lane', anonymous=True)
 
+    bridge = CvBridge()
+    pub_lane_map = rospy.Publisher('/lane_map', Image, queue_size=1)
+    pub_raw_map = rospy.Publisher('/raw_map', Image, queue_size=1)
+
     rospy.Subscriber("raw_img", Image, callback)
 
-    # spin() simply keeps python from exiting until this node is stopped
     rospy.spin()
-
-if __name__ == '__main__':
-    listener()
